@@ -51,14 +51,55 @@ export async function POST(request: NextRequest) {
 
     // Update the script path to point to the correct location
     const scriptPath = path.join(process.cwd(), "app.py");
-    const outputFolderArg = outputFolder ? ` "${outputFolder}"` : "";
-    const command = `python "${scriptPath}" "${filePath}"${outputFolderArg}`;
+    
+    // Create a unique output folder for each video upload to prevent overwriting existing clips
+    let targetOutputFolder = outputFolder;
+    if (!targetOutputFolder) {
+      // If no custom output folder provided, create one with a timestamp and unique ID
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      targetOutputFolder = path.join(process.cwd(), "clips", `${timestamp}-${uniqueId}`);
+    } else {
+      // If custom output folder provided, add a timestamp subfolder to avoid overwrites
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      targetOutputFolder = path.join(outputFolder, `upload-${timestamp}-${uniqueId}`);
+    }
+    
+    // Create the output folder
+    try {
+      await promisify(require("fs").mkdir)(targetOutputFolder, { recursive: true });
+      console.log(`Created output directory: ${targetOutputFolder}`);
+    } catch (error) {
+      console.error(`Error creating output directory: ${error}`);
+    }
+    
+    const outputFolderArg = ` "${targetOutputFolder}"`;
+    const venvPython = path.join(process.cwd(), "venv/bin/python");
+    const command = `"${venvPython}" "${scriptPath}" "${filePath}"${outputFolderArg}`;
 
     console.log(`Executing command: ${command}`);
 
-    // Execute the command
+    // Execute the command with environment variables
     try {
-      const { stdout, stderr } = await execPromise(command);
+      // Print current environment paths
+      console.log('Running Python path check...');
+      await execPromise('which python; which python3; echo $PATH');
+      
+      // Get API key from the form if provided
+      const apiKey = formData.get("api_key") as string;
+      
+      // Add API key to environment variables if provided
+      const env = { 
+        ...process.env, 
+        PATH: process.env.PATH 
+      };
+      
+      if (apiKey) {
+        console.log('Using API key from form submission');
+        env.OPENAI_API_KEY = apiKey;
+      }
+      
+      // Execute with environment variables
+      const { stdout, stderr } = await execPromise(command, { env });
       console.log('Python script output:', stdout);
       
       if (stderr) {
@@ -69,7 +110,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         success: true,
         message: "Video processed successfully",
-        outputFolder: outputFolder || path.join(path.dirname(filePath), "Viral_Clips"),
+        outputFolder: targetOutputFolder,
       });
     } catch (error) {
       console.error("Error executing Python script:", error);

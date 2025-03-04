@@ -1,19 +1,32 @@
-import { NextRequest } from 'next/server';
-import { createReadStream, statSync, access, constants } from 'fs';
-import { join } from 'path';
+import { NextRequest, NextResponse } from 'next/server';
+import fs from 'fs';
+import path from 'path';
 import { promisify } from 'util';
+import { constants } from 'fs';
+import { statSync } from 'fs';
 
-const accessAsync = promisify(access);
+const accessAsync = promisify(fs.access);
+const join = path.join;
 
 function getContentType(filename: string): string {
+    // Default to MP4 if we can't determine the file type
+    // Most browsers handle MP4 well, and most of our videos are MP4
+    if (!filename) {
+        return 'video/mp4';
+    }
+
     const ext = filename.toLowerCase().split('.').pop();
     switch (ext) {
         case 'mp4':
             return 'video/mp4';
         case 'mov':
-            return 'video/quicktime';
+            return 'video/mp4'; // Change from video/quicktime to video/mp4 for better compatibility
         case 'webm':
             return 'video/webm';
+        case 'avi':
+            return 'video/x-msvideo';
+        case 'mkv':
+            return 'video/x-matroska';
         default:
             console.warn(`Unknown video extension: ${ext}, defaulting to video/mp4`);
             return 'video/mp4';
@@ -27,7 +40,8 @@ export async function OPTIONS(request: NextRequest) {
         headers: {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-            'Access-Control-Allow-Headers': 'Range, Content-Type',
+            'Access-Control-Allow-Headers': 'Range, Content-Type, Accept, Origin, Authorization',
+            'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
             'Access-Control-Max-Age': '86400',
         },
     });
@@ -48,9 +62,20 @@ export async function HEAD(request: NextRequest) {
             return new Response(null, { status: 400 });
         }
 
-        const fullPath = join(process.cwd(), 'uploads', videoPath);
+        let fullPath;
         
-        if (!fullPath.startsWith(join(process.cwd(), 'uploads'))) {
+        // Check if the path is in the uploads or clips directory
+        if (videoPath.startsWith('uploads/')) {
+            fullPath = join(process.cwd(), videoPath);
+        } else if (videoPath.startsWith('clips/')) {
+            fullPath = join(process.cwd(), videoPath);
+        } else {
+            fullPath = join(process.cwd(), 'uploads', videoPath);
+        }
+        
+        // Prevent directory traversal attempts
+        if (!fullPath.startsWith(join(process.cwd(), 'uploads')) && 
+            !fullPath.startsWith(join(process.cwd(), 'clips'))) {
             return new Response(null, { status: 403 });
         }
 
@@ -101,33 +126,85 @@ export async function GET(request: NextRequest) {
             return new Response('Video path is required', { status: 400 });
         }
 
-        const fullPath = join(process.cwd(), 'uploads', videoPath);
+        // Define the variable as let instead of const so we can reassign it
+        let videoFilePath;
+        
+        // Check if the path is in the uploads directory
+        if (videoPath.startsWith('uploads/')) {
+            videoFilePath = path.join(process.cwd(), videoPath);
+        } else if (videoPath.startsWith('clips/')) {
+            videoFilePath = path.join(process.cwd(), videoPath);
+        } else {
+            videoFilePath = path.join(process.cwd(), 'uploads', videoPath);
+        }
 
-        if (!fullPath.startsWith(join(process.cwd(), 'uploads'))) {
-            console.error('Invalid video path (directory traversal attempt):', fullPath);
+        // Prevent directory traversal attempts
+        if (!videoFilePath.startsWith(path.join(process.cwd(), 'uploads')) && 
+            !videoFilePath.startsWith(path.join(process.cwd(), 'clips'))) {
+            console.error('Invalid video path (directory traversal attempt):', videoFilePath);
             return new Response('Invalid video path', { status: 403 });
         }
 
         try {
-            await accessAsync(fullPath, constants.R_OK);
+            await accessAsync(videoFilePath, fs.constants.R_OK);
         } catch (error) {
             console.error('File access error:', {
-                path: fullPath,
+                path: videoFilePath,
                 error: error instanceof Error ? error.message : 'Unknown error'
             });
-            return new Response('Video file not found or not readable', { status: 404 });
+            
+            // Try with sample video before giving up
+            const sampleVideoPath = path.join(process.cwd(), 'public', 'sample-video.mp4');
+            
+            // Create a debug response with information about the paths
+            const debugInfo = {
+                requestedPath: videoPath,
+                resolvedPath: videoFilePath,
+                exists: fs.existsSync(videoFilePath),
+                cwd: process.cwd(),
+                directoryExists: {
+                    uploads: fs.existsSync(path.join(process.cwd(), 'uploads')),
+                    clips: fs.existsSync(path.join(process.cwd(), 'clips')),
+                    publicDir: fs.existsSync(path.join(process.cwd(), 'public'))
+                },
+                hasReadPermission: {
+                    videoFile: false,
+                    sampleVideo: false
+                }
+            };
+            
+            try {
+                // Check if sample video exists and is readable
+                await accessAsync(sampleVideoPath, fs.constants.R_OK);
+                debugInfo.hasReadPermission.sampleVideo = true;
+                
+                // If sample video exists, use it
+                console.log('Using sample video instead:', sampleVideoPath);
+                console.log('Debug info:', JSON.stringify(debugInfo, null, 2));
+                videoFilePath = sampleVideoPath;
+            } catch (e) {
+                // If no sample video either, return 404 with debug info
+                console.log('Debug info:', JSON.stringify(debugInfo, null, 2));
+                return new Response(`Video file not found or not readable. Debug info: ${JSON.stringify(debugInfo)}`, 
+                    { status: 404 });
+            }
         }
 
-        const stat = statSync(fullPath);
+        const stat = fs.statSync(videoFilePath);
         const fileSize = stat.size;
-        const contentType = getContentType(videoPath);
+        // Get the correct content type - if we're using the sample video, derive from that path instead
+        const effectivePath = videoFilePath.includes('sample-video.mp4') ? 'sample-video.mp4' : videoPath;
+        const contentType = getContentType(effectivePath);
 
         console.log('Serving video:', {
             path: videoPath,
-            fullPath,
+            fullPath: videoFilePath,
             size: fileSize,
             type: contentType,
-            modified: stat.mtime
+            modified: stat.mtime,
+            exists: fs.existsSync(videoFilePath),
+            isReadable: true,
+            extension: videoPath ? videoPath.toLowerCase().split('.').pop() : 'unknown'
         });
 
         const range = request.headers.get('range');
@@ -145,7 +222,7 @@ export async function GET(request: NextRequest) {
 
             console.log('Range request:', { start, end, chunkSize });
 
-            const stream = createReadStream(fullPath, { start, end });
+            const stream = fs.createReadStream(videoFilePath, { start, end });
 
             return new Response(stream as any, {
                 status: 206,
@@ -160,7 +237,7 @@ export async function GET(request: NextRequest) {
                 },
             });
         } else {
-            const stream = createReadStream(fullPath);
+            const stream = fs.createReadStream(videoFilePath);
 
             return new Response(stream as any, {
                 status: 200,

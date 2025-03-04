@@ -2,44 +2,291 @@ import os
 import logging
 import json
 import time
+import numpy as np
 from typing import List, Dict, Any
 from moviepy.editor import VideoFileClip
 from openai import OpenAI
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Check if we're in demo mode (without API key)
+DEMO_MODE = os.environ.get('OPENAI_API_KEY') is None
+if DEMO_MODE:
+    logging.warning("Running in DEMO mode without OpenAI API key. Will use mock data.")
+
 # Initialize OpenAI client using environment variable directly
-client = OpenAI()  # OpenAI will automatically use OPENAI_API_KEY from environment
+try:
+    client = OpenAI()  # OpenAI will automatically use OPENAI_API_KEY from environment
+except Exception as e:
+    if DEMO_MODE:
+        logging.warning(f"OpenAI client initialization failed, but running in demo mode: {e}")
+    else:
+        raise
+
+def split_audio(input_file: str, segment_length: int = 15 * 60) -> List[str]:
+    """
+    Split a long audio file into segments of the specified length (in seconds).
+    OpenAI's Whisper API has a limit of 25MB which is roughly 25 minutes of audio.
+    We'll use segments of 15 minutes to be safe.
+    
+    Args:
+        input_file: Path to the video file to extract audio from
+        segment_length: Length of each segment in seconds (default: 15 minutes)
+        
+    Returns:
+        List of paths to the temporary audio segments
+    """
+    logging.info(f"Splitting audio from video: {input_file} into segments")
+    
+    try:
+        with VideoFileClip(input_file) as video:
+            # Get the duration of the video
+            duration = video.duration
+            logging.info(f"Video duration: {duration} seconds")
+            
+            # If the video is shorter than segment_length, no need to split
+            if duration <= segment_length:
+                temp_audio_file = "temp_audio_full.mp3"
+                video.audio.write_audiofile(temp_audio_file)
+                return [temp_audio_file]
+            
+            # Create segments
+            temp_files = []
+            num_segments = int(np.ceil(duration / segment_length))
+            logging.info(f"Splitting into {num_segments} segments")
+            
+            for i in range(num_segments):
+                start_time = i * segment_length
+                end_time = min((i + 1) * segment_length, duration)
+                
+                # Extract the segment
+                segment = video.subclip(start_time, end_time)
+                temp_file = f"temp_audio_segment_{i}.mp3"
+                segment.audio.write_audiofile(temp_file)
+                temp_files.append(temp_file)
+                
+            return temp_files
+            
+    except Exception as e:
+        logging.error(f"Error splitting audio: {str(e)}")
+        return []
+
+def merge_transcript_segments(transcript_segments: List[Dict[str, Any]], segment_lengths: List[float]) -> Dict[str, Any]:
+    """
+    Merge multiple transcript segments into a single transcript, adjusting timestamps.
+    
+    Args:
+        transcript_segments: List of transcript dictionaries from the API
+        segment_lengths: List of durations for each segment to adjust timestamps
+        
+    Returns:
+        A merged transcript dictionary
+    """
+    if not transcript_segments:
+        return {}
+    
+    if len(transcript_segments) == 1:
+        return transcript_segments[0]
+    
+    # Initialize the merged transcript with basic structure from the first segment
+    merged = {
+        "task": transcript_segments[0].get("task", "transcribe"),
+        "language": transcript_segments[0].get("language", "english"),
+        "duration": sum(segment_lengths),
+        "text": "",
+        "segments": []
+    }
+    
+    # Keep track of the current offset for adjusting timestamps
+    current_offset = 0
+    segment_id = 0
+    
+    # Process each transcript segment
+    for i, transcript in enumerate(transcript_segments):
+        # Adjust segment text
+        merged["text"] += transcript.get("text", "") + " "
+        
+        # Adjust segments with correct timestamps
+        for segment in transcript.get("segments", []):
+            new_segment = segment.copy()
+            new_segment["id"] = segment_id
+            new_segment["start"] += current_offset
+            new_segment["end"] += current_offset
+            
+            # Adjust word timestamps if they exist
+            if "words" in new_segment:
+                for word in new_segment["words"]:
+                    word["start"] += current_offset
+                    word["end"] += current_offset
+            
+            merged["segments"].append(new_segment)
+            segment_id += 1
+        
+        # Update the offset for the next segment
+        current_offset += segment_lengths[i]
+    
+    logging.info(f"Merged {len(transcript_segments)} transcript segments successfully")
+    return merged
 
 def transcribe_video(input_file: str) -> Dict[str, Any]:
     logging.info(f"Transcribing video: {input_file}")
+    
+    # Use mock data if in demo mode
+    if DEMO_MODE:
+        logging.info("Using mock transcription data (DEMO mode)")
+        # Mock transcript data
+        mock_transcript = {
+            "task": "transcribe",
+            "language": "english",
+            "duration": 120.5,
+            "text": "Welcome to the Wild Kratts! Today we're exploring the amazing Amazon rainforest. Did you know that the poison dart frog has enough toxin to take down ten grown men? Amazing! And look at that, a sloth moves so slowly that algae grows on its fur, creating a mini ecosystem.",
+            "segments": [
+                {
+                    "id": 0,
+                    "start": 0.0,
+                    "end": 5.0,
+                    "text": "Welcome to the Wild Kratts!",
+                    "words": [{"word": "Welcome", "start": 0.0, "end": 1.2},
+                             {"word": "to", "start": 1.3, "end": 1.5},
+                             {"word": "the", "start": 1.6, "end": 1.8},
+                             {"word": "Wild", "start": 1.9, "end": 2.5},
+                             {"word": "Kratts!", "start": 2.6, "end": 5.0}]
+                },
+                {
+                    "id": 1,
+                    "start": 5.5,
+                    "end": 15.0,
+                    "text": "Today we're exploring the amazing Amazon rainforest.",
+                    "words": [{"word": "Today", "start": 5.5, "end": 6.0},
+                              {"word": "we're", "start": 6.1, "end": 6.5},
+                              {"word": "exploring", "start": 6.6, "end": 7.5},
+                              {"word": "the", "start": 7.6, "end": 7.8},
+                              {"word": "amazing", "start": 7.9, "end": 9.0},
+                              {"word": "Amazon", "start": 9.1, "end": 10.5},
+                              {"word": "rainforest.", "start": 10.6, "end": 15.0}]
+                },
+                {
+                    "id": 2,
+                    "start": 16.0,
+                    "end": 25.0,
+                    "text": "Did you know that the poison dart frog has enough toxin to take down ten grown men?",
+                    "words": [{"word": "Did", "start": 16.0, "end": 16.5},
+                             {"word": "you", "start": 16.6, "end": 16.8},
+                             {"word": "know", "start": 16.9, "end": 17.2},
+                             {"word": "that", "start": 17.3, "end": 17.5},
+                             {"word": "the", "start": 17.6, "end": 17.8},
+                             {"word": "poison", "start": 17.9, "end": 18.5},
+                             {"word": "dart", "start": 18.6, "end": 19.0},
+                             {"word": "frog", "start": 19.1, "end": 19.5},
+                             {"word": "has", "start": 19.6, "end": 20.0},
+                             {"word": "enough", "start": 20.1, "end": 20.5},
+                             {"word": "toxin", "start": 20.6, "end": 21.0},
+                             {"word": "to", "start": 21.1, "end": 21.2},
+                             {"word": "take", "start": 21.3, "end": 21.8},
+                             {"word": "down", "start": 21.9, "end": 22.5},
+                             {"word": "ten", "start": 22.6, "end": 23.0},
+                             {"word": "grown", "start": 23.1, "end": 24.0},
+                             {"word": "men?", "start": 24.1, "end": 25.0}]
+                }
+            ]
+        }
+        return mock_transcript
+        
     try:
+        # Split the video into manageable audio chunks
+        audio_segments = split_audio(input_file)
+        if not audio_segments:
+            logging.error("Failed to split audio from video")
+            return None
+        
+        # Get the duration of each segment for timestamp adjustment
+        segment_durations = []
         with VideoFileClip(input_file) as video:
-            # Extract audio and save as a temporary file
-            temp_audio_file = "temp_audio.mp3"
-            video.audio.write_audiofile(temp_audio_file)
-
-        # Open the audio file and send it to the OpenAI API
-        with open(temp_audio_file, "rb") as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="verbose_json",
-                timestamp_granularities=["segment", "word"]
-            )
-
-        # Remove the temporary audio file
-        os.remove(temp_audio_file)
-
-        logging.info(f"Transcription completed for: {input_file}")
-        return transcript.model_dump()  # Convert Pydantic model to dict
+            total_duration = video.duration
+            segment_length = 15 * 60  # 15 minutes in seconds
+            
+            for i in range(len(audio_segments)):
+                start_time = i * segment_length
+                end_time = min((i + 1) * segment_length, total_duration)
+                segment_durations.append(end_time - start_time)
+        
+        # Process each audio segment
+        transcript_segments = []
+        for i, audio_file in enumerate(audio_segments):
+            logging.info(f"Transcribing audio segment {i+1}/{len(audio_segments)}")
+            
+            try:
+                # Open the audio file and send it to the OpenAI API
+                with open(audio_file, "rb") as file:
+                    transcript = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=file,
+                        response_format="verbose_json",
+                        timestamp_granularities=["segment", "word"]
+                    )
+                
+                transcript_segments.append(transcript.model_dump())
+                logging.info(f"Successfully transcribed segment {i+1}")
+            except Exception as e:
+                logging.error(f"Error transcribing segment {i+1}: {str(e)}")
+                # Continue with other segments even if one fails
+            finally:
+                # Clean up the temporary audio file
+                try:
+                    os.remove(audio_file)
+                    logging.info(f"Removed temporary audio file: {audio_file}")
+                except Exception as e:
+                    logging.error(f"Error removing temporary file {audio_file}: {str(e)}")
+        
+        # Merge the transcript segments and adjust timestamps
+        if transcript_segments:
+            merged_transcript = merge_transcript_segments(transcript_segments, segment_durations)
+            logging.info(f"Transcription completed for: {input_file}")
+            return merged_transcript
+        else:
+            logging.error("No transcript segments were successfully generated")
+            return None
+            
     except Exception as e:
         logging.error(f"Error transcribing video {input_file}: {str(e)}")
         return None
 
 def analyze_transcript(transcription: Dict[str, Any]) -> List[Dict[str, Any]]:
     logging.info("Analyzing transcript with AI")
+    
+    # Use mock data if in demo mode
+    if DEMO_MODE:
+        logging.info("Using mock analysis data (DEMO mode)")
+        # Mock analysis response
+        mock_clips = [
+            {
+                "timecodes": [16.0, 25.0],
+                "description": "This segment features the fascinating poison dart frog, showcasing its surprising toxicity. The Kratt brothers' enthusiastic explanation and animated visuals make this fact engaging for viewers of all ages. The vibrant colors of the frog combined with the amazing fact about its poison potency creates a perfect mix of visual appeal and educational value.",
+                "entertainment_score": 9,
+                "educational_score": 10,
+                "clarity_score": 9,
+                "shareability_score": 10,
+                "length_score": 10,
+                "analysis": {
+                    "animal_facts": [
+                        "Poison dart frogs contain enough toxin to take down ten adult humans",
+                        "These frogs are among the most toxic animals on Earth",
+                        "Their bright colors warn predators of their toxicity"
+                    ],
+                    "context_and_setup": "The clip begins with Chris asking a provocative question that immediately hooks the viewer's interest, creating curiosity about what makes this tiny frog so special.",
+                    "emotional_engagement": "Martin's exaggerated reaction of surprise and disbelief creates an emotional response that helps viewers understand the significance of this fact. The brothers' enthusiasm is contagious.",
+                    "follow_up": "After revealing the main fact, they explain how these frogs use this defense mechanism in the wild, providing important ecological context.",
+                    "educational_entertainment_balance": "This clip perfectly balances the shocking fact about the frog's toxicity with the brothers' entertaining reactions, making the educational content highly engaging."
+                },
+                "text_hook": "This tiny frog could take down 10 grown men! 🐸☠️"
+            }
+        ]
+        return mock_clips
     
     # Access segments from the transcription dictionary
     segments = transcription.get("segments", [])
@@ -127,7 +374,7 @@ def analyze_transcript(transcription: Dict[str, Any]) -> List[Dict[str, Any]]:
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",  # Using GPT-4 for better analysis
+            model="gpt-4.5-preview",  # Using GPT-4 for better analysis
             messages=[
                 {"role": "system", "content": "You are a world-class social media expert and viral content creator."},
                 {"role": "user", "content": prompt}
@@ -157,14 +404,105 @@ def analyze_transcript(transcription: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def create_vertical_clips(input_file: str, viral_clips: List[Dict[str, Any]], output_folder: str) -> None:
     logging.info(f"Creating vertical clips from: {input_file}")
+    
+    # Use mock processing in demo mode
+    if DEMO_MODE:
+        logging.info("Using mock clip creation (DEMO mode)")
+        
+        # Just copy the input file to simulate creating clips
+        try:
+            # Make sure the output folder exists
+            os.makedirs(output_folder, exist_ok=True)
+            
+            for i, clip_info in enumerate(viral_clips, 1):
+                # Get the file extension from the input file
+                file_extension = os.path.splitext(input_file)[1]
+                # Create clip filenames
+                clip_output = os.path.join(output_folder, f"viral_clip_{i}{file_extension}")
+                
+                # In demo mode, we just copy the original video as a placeholder
+                # In a real scenario, we would create vertical clips with the proper timecodes
+                import shutil
+                shutil.copy(input_file, clip_output)
+                logging.info(f"Demo vertical clip {i} created: {clip_output}")
+            
+            return
+        except Exception as e:
+            logging.error(f"Error in demo clip creation: {str(e)}")
+            return
+    
+    # Real processing for non-demo mode
     try:
+        # Patch moviepy to use the right resize method
+        from moviepy.video.fx.resize import resize
+        from moviepy.video.VideoClip import VideoClip
+        
+        # Monkey patch the resize function in moviepy to avoid using ANTIALIAS
+        original_resize = VideoClip.resize
+        
+        def patched_resize(clip, newsize=None, height=None, width=None, apply_to_mask=True):
+            """Monkey patched resize that avoids using ANTIALIAS"""
+            logging.info("Using patched resize method for compatibility with Pillow 10+")
+            
+            # Handle the case where height is specified
+            if height is not None:
+                if width is None:
+                    width = int(clip.w * height / clip.h)
+                newsize = (width, height)
+            
+            # Handle the case where width is specified
+            elif width is not None:
+                if height is None:
+                    height = int(clip.h * width / clip.w)
+                newsize = (width, height)
+            
+            # If we have the new size, use the original resize function but skip apply_to_mask
+            # which causes the ANTIALIAS issue
+            if newsize is not None:
+                # Create a new clip with the resized frames
+                new_clip = clip.copy()
+                new_clip.size = newsize
+                
+                # Patch the make_frame function
+                old_make_frame = clip.make_frame
+                def new_make_frame(t):
+                    frame = old_make_frame(t)
+                    from PIL import Image
+                    # Convert numpy array to PIL Image
+                    pil_frame = Image.fromarray(frame)
+                    # Resize using LANCZOS instead of ANTIALIAS
+                    # LANCZOS is the modern replacement for ANTIALIAS
+                    if hasattr(Image, 'Resampling'):
+                        resized_frame = pil_frame.resize(newsize, Image.Resampling.LANCZOS)
+                    else:
+                        # Fallback for older Pillow versions
+                        resized_frame = pil_frame.resize(newsize, Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.BICUBIC)
+                    # Convert back to numpy array
+                    return np.array(resized_frame)
+                
+                new_clip.make_frame = new_make_frame
+                
+                # Handle mask if needed and if the clip has a mask
+                if apply_to_mask and clip.mask is not None:
+                    new_clip.mask = patched_resize(clip.mask, newsize=newsize, apply_to_mask=False)
+                
+                return new_clip
+            
+            return clip  # Return original clip if no resize needed
+        
+        # Temporarily replace the resize method
+        VideoClip.resize = patched_resize
+        
+        # Now process videos using our patched resize
         with VideoFileClip(input_file) as video:
             for i, clip_info in enumerate(viral_clips, 1):
                 start, end = clip_info['timecodes']
                 segment = video.subclip(start, end)
                 
-                # Resize and crop for vertical format
+                # Resize to vertical format (9:16 aspect ratio)
+                # First resize to appropriate height
                 vertical_segment = segment.resize(height=1920)
+                # Then center crop to 9:16 ratio
                 vertical_segment = vertical_segment.crop(x_center=vertical_segment.w/2, width=1080)
                 
                 # Save individual vertical clips
@@ -172,9 +510,15 @@ def create_vertical_clips(input_file: str, viral_clips: List[Dict[str, Any]], ou
                 vertical_segment.write_videofile(clip_output, codec='libx264')
                 logging.info(f"Vertical clip {i} created: {clip_output}")
         
+        # Restore the original resize method
+        VideoClip.resize = original_resize
+        
         logging.info(f"All vertical clips created for: {input_file}")
     except Exception as e:
         logging.error(f"Error creating vertical clips for {input_file}: {str(e)}")
+        logging.error(f"Exception details: {type(e).__name__}: {str(e)}")
+        
+        # No fallback to copying - we want to fix the resize issue
 
 def save_metadata(viral_clips: List[Dict[str, Any]], output_folder: str) -> None:
     metadata_file = os.path.join(output_folder, "viral_clips_metadata.json")

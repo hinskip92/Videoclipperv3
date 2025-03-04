@@ -11,7 +11,9 @@ const VideoUploadForm = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [outputFolder, setOutputFolder] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [processedResult, setProcessedResult] = useState<string | null>(null);
+  const [processingPhase, setProcessingPhase] = useState<string>("idle");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
@@ -27,11 +29,17 @@ const VideoUploadForm = () => {
     setOutputFolder(e.target.value);
   };
 
+  const handleApiKeyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setApiKey(e.target.value);
+  };
+
   const handleReset = () => {
     setSelectedFile(null);
     setOutputFolder("");
     setProcessedResult(null);
     setUploadProgress(0);
+    setProcessingPhase("idle");
+    // Don't reset API key to maintain it across uploads
   };
 
   const handleUpload = async () => {
@@ -39,12 +47,15 @@ const VideoUploadForm = () => {
 
     setIsUploading(true);
     setUploadProgress(0);
+    setProcessingPhase("uploading");
+    
+    toast("Upload started", "Uploading your video file...", "default");
 
-    // Simulate progress
-    const interval = setInterval(() => {
+    // Simulate upload progress
+    const uploadInterval = setInterval(() => {
       setUploadProgress((prev) => {
         if (prev >= 95) {
-          clearInterval(interval);
+          clearInterval(uploadInterval);
           return 95;
         }
         return prev + 5;
@@ -60,20 +71,36 @@ const VideoUploadForm = () => {
         formData.append("output_folder", outputFolder);
       }
 
+      if (apiKey) {
+        formData.append("api_key", apiKey);
+      }
+
+      // Update phase to show upload is complete
+      setTimeout(() => {
+        clearInterval(uploadInterval);
+        setUploadProgress(100);
+        setProcessingPhase("analyzing");
+        toast("Analysis started", "AI is analyzing your video content...", "default");
+        
+        // After a short delay, simulate next phase
+        setTimeout(() => {
+          setProcessingPhase("generating");
+          toast("Generating clips", "Creating vertical clips from your video...", "default");
+        }, 3000);
+      }, 3000);
+
       // Send the actual request to the backend
       const response = await fetch("/api/process-video", {
         method: "POST",
         body: formData,
       });
 
-      clearInterval(interval);
-
       if (response.ok) {
-        setUploadProgress(100);
         // Process response as needed
         const result = await response.json();
         console.log("Upload successful:", result);
         setProcessedResult(result.outputFolder);
+        setProcessingPhase("complete");
         toast(
           "Processing complete",
           "Your video has been successfully processed!",
@@ -81,6 +108,7 @@ const VideoUploadForm = () => {
         );
       } else {
         console.error("Upload failed");
+        setProcessingPhase("error");
         toast(
           "Upload failed",
           "There was an error processing your video. Please try again.",
@@ -89,6 +117,7 @@ const VideoUploadForm = () => {
       }
     } catch (error) {
       console.error("Error during upload:", error);
+      setProcessingPhase("error");
       toast(
         "Error",
         "An unexpected error occurred. Please try again.",
@@ -109,6 +138,44 @@ const VideoUploadForm = () => {
   if (processedResult) {
     return <ResultsDisplay outputFolder={processedResult} onReset={handleReset} />;
   }
+
+  // Get phase display information
+  const getPhaseInfo = () => {
+    switch (processingPhase) {
+      case "uploading":
+        return {
+          title: "Uploading Video",
+          description: "Uploading your video file to the server...",
+          progress: uploadProgress
+        };
+      case "analyzing":
+        return {
+          title: "Analyzing Content",
+          description: "AI is analyzing your video to identify interesting moments...",
+          progress: 100
+        };
+      case "generating":
+        return {
+          title: "Creating Clips",
+          description: "Converting selected moments into vertical clips...",
+          progress: 100
+        };
+      case "error":
+        return {
+          title: "Processing Error",
+          description: "An error occurred while processing your video.",
+          progress: 100
+        };
+      default:
+        return {
+          title: "Upload Progress",
+          description: "",
+          progress: uploadProgress
+        };
+    }
+  };
+
+  const phaseInfo = getPhaseInfo();
 
   // Otherwise show the upload form
   return (
@@ -135,6 +202,21 @@ const VideoUploadForm = () => {
 
         <div>
           <label className="block text-sm font-medium mb-1">
+            OpenAI API Key (optional):
+          </label>
+          <Input
+            type="password"
+            placeholder="sk-..."
+            value={apiKey}
+            onChange={handleApiKeyChange}
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Provide your OpenAI API key for full functionality. Leave empty to use demo mode.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium mb-1">
             Output Folder (optional):
           </label>
           <Input
@@ -148,10 +230,23 @@ const VideoUploadForm = () => {
         {isUploading && (
           <div className="mt-4">
             <label className="block text-sm font-medium mb-1">
-              Upload Progress:
+              {phaseInfo.title}:
             </label>
-            <Progress value={uploadProgress} className="h-2" />
-            <p className="text-xs text-center mt-1">{uploadProgress}%</p>
+            <Progress value={phaseInfo.progress} className="h-2" />
+            <div className="flex flex-col items-center mt-2">
+              <p className="text-xs text-center">{phaseInfo.description}</p>
+              {processingPhase === "uploading" && (
+                <p className="text-xs font-semibold mt-1">{uploadProgress}%</p>
+              )}
+              {processingPhase !== "idle" && processingPhase !== "error" && (
+                <div className="flex items-center space-x-1 mt-2">
+                  <div className={`h-2 w-2 rounded-full ${processingPhase === "uploading" ? "bg-blue-500" : "bg-gray-300"}`}></div>
+                  <div className={`h-2 w-2 rounded-full ${processingPhase === "analyzing" ? "bg-blue-500" : "bg-gray-300"}`}></div>
+                  <div className={`h-2 w-2 rounded-full ${processingPhase === "generating" ? "bg-blue-500" : "bg-gray-300"}`}></div>
+                  <div className={`h-2 w-2 rounded-full ${processingPhase === "complete" ? "bg-blue-500" : "bg-gray-300"}`}></div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </CardContent>
@@ -161,7 +256,7 @@ const VideoUploadForm = () => {
           disabled={!selectedFile || isUploading}
           className="w-full"
         >
-          {isUploading ? "Processing..." : "Process Video"}
+          {isUploading ? `${processingPhase.charAt(0).toUpperCase() + processingPhase.slice(1)}...` : "Process Video"}
         </Button>
       </CardFooter>
     </Card>
