@@ -1,0 +1,26 @@
+[
+  {
+    "timecodes": [
+      16,
+      25
+    ],
+    "description": "This segment features the fascinating poison dart frog, showcasing its surprising toxicity. The Kratt brothers' enthusiastic explanation and animated visuals make this fact engaging for viewers of all ages.",
+    "entertainment_score": 9,
+    "educational_score": 10,
+    "clarity_score": 9,
+    "shareability_score": 10,
+    "length_score": 10,
+    "analysis": {
+      "animal_facts": [
+        "Poison dart frogs contain enough toxin to take down ten adult humans",
+        "These frogs are among the most toxic animals on Earth",
+        "Their bright colors warn predators of their toxicity"
+      ],
+      "context_and_setup": "The clip begins with a provocative question that hooks the viewer's interest.",
+      "emotional_engagement": "The brothers' reactions create an emotional response that helps viewers understand the significance.",
+      "follow_up": "After revealing the main fact, they explain how these frogs use this defense mechanism in the wild.",
+      "educational_entertainment_balance": "This clip balances the shocking fact with entertaining reactions."
+    },
+    "text_hook": "This tiny frog could take down 10 grown men! 🐸☠️"
+  }
+]
